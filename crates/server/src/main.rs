@@ -1,6 +1,6 @@
+use std::env;
 use std::net::TcpListener;
 use std::sync::Arc;
-
 use warp::Filter;
 
 use tungstenite::{
@@ -13,23 +13,24 @@ use paris::{error, info, success};
 
 #[tokio::main]
 async fn main() {
-    let server = TcpListener::bind("127.0.0.1:3012").unwrap();
+    let server_url = env::var("SERVER_URL").unwrap_or_else(|_| "127.0.0.1:3012".to_string());
+    let server = TcpListener::bind(server_url).unwrap();
 
     let db = Arc::new(sled::open("./db").unwrap());
     serve(&db);
 
     for stream in server.incoming() {
         let db = db.clone();
+        let results_url =
+            env::var("RESULTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
         tokio::spawn(async move {
             let uuid = Uuid::new_v4().to_string();
             let callback = |_req: &Request, mut response: Response| {
                 success!("{}: connection opened", uuid);
                 let headers = response.headers_mut();
                 headers.append(
-                    "x-url",
-                    format!("http://127.0.0.1:3000/uuid/{}", uuid)
-                        .parse()
-                        .unwrap(),
+                    "x-results-url",
+                    format!("{}/results/{}", results_url, uuid).parse().unwrap(),
                 );
                 Ok(response)
             };
@@ -79,7 +80,7 @@ pub fn serve(db: &Arc<sled::Db>) {
     tokio::spawn(async move {
         let up = warp::path("up").map(|| "have a squizzy taylor");
 
-        let by_uuid = warp::path!("uuid" / String).map(move |uuid| {
+        let results_by_uuid = warp::path!("results" / String).map(move |uuid| {
             let iter = db.scan_prefix(uuid);
             let results = iter
                 .map(|x| String::from_utf8_lossy(&x.unwrap().1).to_string())
@@ -88,7 +89,7 @@ pub fn serve(db: &Arc<sled::Db>) {
             format!("{}", results)
         });
 
-        let routes = warp::get().and(up.or(by_uuid));
+        let routes = warp::get().and(up.or(results_by_uuid));
 
         warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
     });
