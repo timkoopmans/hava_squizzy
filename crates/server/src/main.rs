@@ -1,4 +1,5 @@
 use std::env;
+use std::error::Error;
 use std::net::TcpListener;
 use std::sync::Arc;
 use warp::Filter;
@@ -10,6 +11,12 @@ use tungstenite::{
 use uuid::Uuid;
 
 use paris::{error, info, success};
+
+use async_openai::types::CreateChatCompletionResponse;
+use async_openai::{
+    types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role},
+    Client,
+};
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +37,7 @@ async fn main() {
                 let headers = response.headers_mut();
                 headers.append(
                     "x-results-url",
-                    format!("{}/results/{}", results_url, uuid).parse().unwrap(),
+                    format!("{}/{}", results_url, uuid).parse().unwrap(),
                 );
                 Ok(response)
             };
@@ -75,22 +82,56 @@ async fn main() {
     }
 }
 
-pub fn serve(db: &Arc<sled::Db>) {
+fn serve(db: &Arc<sled::Db>) {
     let db = db.clone();
     tokio::spawn(async move {
-        let up = warp::path("up").map(|| "have a squizzy taylor");
-
-        let results_by_uuid = warp::path!("results" / String).map(move |uuid| {
-            let iter = db.scan_prefix(uuid);
-            let results = iter
-                .map(|x| String::from_utf8_lossy(&x.unwrap().1).to_string())
-                .collect::<Vec<String>>()
-                .join("\n");
-            format!("{}", results)
+        let routes = warp::path::param().and_then({
+            let db = db.clone();
+            move |uuid: String| {
+                let db = db.clone();
+                async move {
+                    if uuid != "0" {
+                        let iter = db.scan_prefix(uuid);
+                        let results = iter
+                            .map(|x| String::from_utf8_lossy(&x.unwrap().1).to_string())
+                            .collect::<Vec<String>>()
+                            .join("\n");
+                        let analyzed_results = analyze_results(results.clone()).await.unwrap();
+                        let description = analyzed_results.choices[0].message.content.clone();
+                        Ok(format!("{}\n---\n{}", description, results))
+                    } else {
+                        Err(warp::reject::not_found())
+                    }
+                }
+            }
         });
-
-        let routes = warp::get().and(up.or(results_by_uuid));
-
         warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
     });
+}
+
+async fn analyze_results(results: String) -> Result<CreateChatCompletionResponse, Box<dyn Error>> {
+    let client = Client::new();
+
+    let input_tokens = 1000usize;
+    let max_chars = input_tokens * 4;
+    let results = results.chars().take(max_chars).collect::<String>();
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .max_tokens(512u16)
+        .model("gpt-3.5-turbo")
+        .messages([
+            ChatCompletionRequestMessageArgs::default()
+                .role(Role::System)
+                .content("Describe and analyze what this data represents:")
+                .build()?,
+            ChatCompletionRequestMessageArgs::default()
+                .role(Role::User)
+                .content(results)
+                .build()?,
+        ])
+        .build()?;
+
+    let response = client.chat().create(request).await?;
+
+    Ok(response)
 }
