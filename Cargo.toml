@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+client = { path = "./crates/client", version = "0.1.0" }
+server = { path = "./crates/server", version = "0.1.0" }
