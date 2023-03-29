@@ -1,11 +1,9 @@
+use paris::success;
+use std::error::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::oneshot;
-use std::error::Error;
 use tungstenite::{connect, Message};
-use url::Url;
-use paris::{error, info, success, warn};
 
 async fn read_console_output(tx: Sender<String>) -> Result<(), Box<dyn Error>> {
     let mut reader = BufReader::new(tokio::io::stdin());
@@ -15,21 +13,28 @@ async fn read_console_output(tx: Sender<String>) -> Result<(), Box<dyn Error>> {
         if n == 0 {
             break;
         }
-        info!("Sending message: {}", line);
         tx.send(line).await?;
     }
     Ok(())
 }
 
-async fn send_messages(url: String, mut rx: tokio::sync::mpsc::Receiver<String>, stop: oneshot::Receiver<()>) -> Result<(), Box<dyn Error>> {
-    let (mut socket, response) =
-        connect(url::Url::parse(&*url).unwrap()).expect("Can't connect");
+async fn send_messages(
+    url: String,
+    mut rx: tokio::sync::mpsc::Receiver<String>,
+    stop: oneshot::Receiver<()>,
+) -> Result<(), Box<dyn Error>> {
+    let (mut socket, response) = connect(url::Url::parse(&*url).unwrap()).expect("Can't connect");
+
+    let url = response.headers().get("x-url").unwrap();
+
+    success!("Results at: {}", url.to_str().unwrap());
 
     while let Some(message) = rx.recv().await {
         if socket.write_message(Message::text(message).into()).is_err() {
             break;
         }
     }
+
     let _ = stop.await;
     socket.close(None)?;
 
@@ -38,7 +43,7 @@ async fn send_messages(url: String, mut rx: tokio::sync::mpsc::Receiver<String>,
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let (tx, mut rx) = channel::<String>(32);
+    let (tx, rx) = channel::<String>(32);
     let (stop_tx, stop_rx) = oneshot::channel();
 
     let console_task = tokio::spawn(async move {
@@ -46,7 +51,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let websocket_task = tokio::spawn(async move {
-        send_messages("ws://127.0.0.1:3012".to_owned(), rx, stop_rx).await.unwrap();
+        send_messages("ws://127.0.0.1:3012".to_owned(), rx, stop_rx)
+            .await
+            .unwrap();
     });
 
     tokio::select! {
@@ -55,6 +62,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ = tokio::signal::ctrl_c() => {},
     }
 
-    stop_tx.send(());
+    stop_tx.send(()).expect("failed to stop");
     Ok(())
 }
