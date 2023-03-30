@@ -90,15 +90,32 @@ fn serve(db: &Arc<sled::Db>) {
             move |uuid: String| {
                 let db = db.clone();
                 async move {
+                    let head = r#"
+                        <!DOCTYPE html>
+                        <html lang="en" style="height: 100%">
+                        <head>
+                          <meta charset="utf-8">
+                          <link rel="stylesheet" href="//unpkg.com/carbon-components@10/css/carbon-components.min.css">
+                        </head>
+                        <body style="height: 100%; margin: 0">
+                          <div id="chart" style="height: 50%"></div>
+                          <script type="text/javascript" src="https://fastly.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
+                        "#;
                     if uuid != "0" {
                         let iter = db.scan_prefix(uuid);
                         let results = iter
                             .map(|x| String::from_utf8_lossy(&x.unwrap().1).to_string())
                             .collect::<Vec<String>>()
-                            .join("\n");
+                            .join("<br>");
+
+                        let visualized_results = visualize_results(results.clone()).await.unwrap();
+                        let content = visualized_results.choices[0].message.content.as_str();
+                        let visualized_content = remove_code_blocks(content);
+                        let chart = format!("<script type=\"text/javascript\">{}</script>", visualized_content);
+
                         let analyzed_results = analyze_results(results.clone()).await.unwrap();
-                        let description = analyzed_results.choices[0].message.content.clone();
-                        Ok(format!("{}\n---\n{}", description, results))
+                        let body = format!("<div><p>{}</p></div>", analyzed_results.choices[0].message.content.clone());
+                        Ok(warp::reply::html(format!("{}{}{}<div><code>{}</code></div></body></html>", head, chart, body, results)))
                     } else {
                         Err(warp::reject::not_found())
                     }
@@ -107,6 +124,21 @@ fn serve(db: &Arc<sled::Db>) {
         });
         warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
     });
+}
+
+fn remove_code_blocks(s: &str) -> &str {
+    let mut s = s;
+    if s.starts_with("```") {
+        s = &s[3..];
+    } else if s.starts_with("`") {
+        s = &s[1..];
+    }
+    if s.ends_with("```") {
+        s = &s[..s.len() - 3];
+    } else if s.ends_with("`") {
+        s = &s[..s.len() - 1];
+    }
+    s
 }
 
 async fn analyze_results(results: String) -> Result<CreateChatCompletionResponse, Box<dyn Error>> {
@@ -123,6 +155,35 @@ async fn analyze_results(results: String) -> Result<CreateChatCompletionResponse
             ChatCompletionRequestMessageArgs::default()
                 .role(Role::System)
                 .content("Describe and analyze what this data represents:")
+                .build()?,
+            ChatCompletionRequestMessageArgs::default()
+                .role(Role::User)
+                .content(results)
+                .build()?,
+        ])
+        .build()?;
+
+    let response = client.chat().create(request).await?;
+
+    Ok(response)
+}
+
+async fn visualize_results(
+    results: String,
+) -> Result<CreateChatCompletionResponse, Box<dyn Error>> {
+    let client = Client::new();
+
+    let input_tokens = 1000usize;
+    let max_chars = input_tokens * 4;
+    let results = results.chars().take(max_chars).collect::<String>();
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .max_tokens(512u16)
+        .model("gpt-3.5-turbo")
+        .messages([
+            ChatCompletionRequestMessageArgs::default()
+                .role(Role::System)
+                .content("Only respond with minified JS code as plain text, without comments and new lines, targeting getElementById(\"chart\"), using ECharts that visualizes a timeseries with following data:")
                 .build()?,
             ChatCompletionRequestMessageArgs::default()
                 .role(Role::User)
